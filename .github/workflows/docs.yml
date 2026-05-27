@@ -1,29 +1,94 @@
-name: Documentation
+name: Documentation CI/CD
+
 on:
   push:
     branches:
-      - master
       - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 * * 0'
+
 permissions:
   contents: read
   pages: write
   id-token: write
+
 jobs:
-  deploy:
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 1 — Validação com Matrix Strategy
+  # Roda o build em múltiplas versões do Python para garantir
+  # compatibilidade antes de qualquer merge.
+  # ─────────────────────────────────────────────────────────────────
+  build_site:
+    name: Build (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Cache das dependências pip para builds mais rápidos
+      - name: Cache de dependências pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+            ${{ runner.os }}-pip-
+
+      - name: Instalar Zensical
+        run: pip install zensical
+
+      - name: Build do site de documentação
+        run: zensical build --clean
+
+      # Faz upload do artefato apenas na versão principal (3.11)
+      # para evitar duplicidade no job de deploy
+      - name: Upload do artefato HTML gerado
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 2 — Deploy no GitHub Pages
+  # Aguarda o build concluir (needs: build_site) e só executa em
+  # push para main ou agendamento — NUNCA em Pull Requests.
+  # ─────────────────────────────────────────────────────────────────
+  deploy_site:
+    name: Deploy para GitHub Pages
+    runs-on: ubuntu-latest
+    needs: build_site
+
+    # Condicional de segurança: bloqueia deploy durante PRs
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/configure-pages@v6
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - name: Download do artefato gerado pelo build
+        uses: actions/download-artifact@v4
         with:
-          python-version: 3.x
-      - run: pip install zensical
-      - run: zensical build --clean
-      - uses: actions/upload-pages-artifact@v5
-        with:
-          path: site
-      - uses: actions/deploy-pages@v5
+          name: github-pages
+          path: ./site-artifact
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy para GitHub Pages
+        uses: actions/deploy-pages@v4
         id: deployment
